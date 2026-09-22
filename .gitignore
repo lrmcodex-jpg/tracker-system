@@ -6,3 +6,6 @@ data/
 tracker.db
 server.log
 *.log
+.vercel/
+.vercel
+.env*

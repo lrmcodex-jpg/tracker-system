@@ -71,25 +71,50 @@
       const btn = document.getElementById('refreshBtn');
       const old = btn.textContent;
       btn.disabled = true; btn.textContent = 'Refreshing…';
+      let hold = 2500;
       try {
         const r = await fetch('/api/refresh', { method: 'POST' });
         const d = await r.json();
-        if (r.ok) {
-          await load();
-          btn.textContent = d.new_positions > 0 ? `+${d.new_positions} new` : 'Up to date';
-        } else {
-          btn.textContent = 'Failed';
+        await load();
+        if (d.started) {
+          // The poller runs on GitHub Actions and takes ~40s, so re-read the
+          // database a few times instead of claiming success immediately.
+          btn.textContent = 'Polling…';
+          hold = 75000;
+          let tries = 0;
+          const before = d.newest || '';
+          const timer = setInterval(async () => {
+            tries += 1;
+            await load();
+            const now = window.__newestReportedAt || '';
+            if (now && now !== before) {
+              clearInterval(timer);
+              btn.textContent = 'Updated';
+              setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2500);
+            } else if (tries >= 8) {
+              clearInterval(timer);
+              btn.textContent = 'Nothing newer';
+              setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 3500);
+            }
+          }, 9000);
+          return;
         }
+        // Not configured, or GitHub refused. Say which, do not just say "Failed".
+        btn.textContent = d.reason === 'not_configured' ? 'Polling is scheduled' : 'Refresh unavailable';
+        if (d.message) btn.title = d.message;
       } catch (e) {
         btn.textContent = 'Failed';
       }
-      setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2500);
+      setTimeout(() => { btn.textContent = old; btn.disabled = false; }, hold);
     }
 
     async function load() {
       const res = await fetch('/api/trackers');
       if (!res.ok) { location.href = '/login'; return; }
       const tags = await res.json();
+      // Newest timestamp across all tags, so the refresh button can tell
+      // whether a poll actually produced anything new.
+      window.__newestReportedAt = tags.map(t => t.reported_at).filter(Boolean).sort().pop() || '';
       const sidebar = document.getElementById('sidebar');
       sidebar.innerHTML = '';
       const bounds = [];

@@ -304,3 +304,74 @@ def change_password(request: Request, current: str = Form(...), new1: str = Form
     resp = RedirectResponse("/", status_code=302)
     _set_session(resp, user.id)
     return resp
+
+
+# --- refresh ----------------------------------------------------------------
+# The map has a "Refresh now" button that POSTs here. This endpoint existed only
+# in app/main.py (the local app), so on Vercel it 404'd and the button always
+# said "Failed".
+#
+# Vercel cannot poll Apple itself: the Find My stack needs native libraries that
+# are deliberately excluded from this bundle. So the honest implementation is to
+# ask GitHub Actions to run the poller, which is where the fetching actually
+# lives. Needs GH_DISPATCH_TOKEN (fine-grained PAT, Actions: read+write on this
+# repo). Without it we say so plainly instead of failing.
+GH_REPO = os.environ.get("GH_REPO", "lrmcodex-jpg/tracker-system")
+GH_WORKFLOW = os.environ.get("GH_WORKFLOW", "poll.yml")
+
+
+@app.post("/api/refresh")
+def api_refresh(request: Request, db: Session = Depends(get_db)):
+    user = current_user(request, db)
+    if user is None:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    newest = db.scalar(select(func.max(Position.reported_at)))
+    newest_iso = newest.isoformat() if newest else None
+
+    token = os.environ.get("GH_DISPATCH_TOKEN", "")
+    if not token:
+        return JSONResponse({
+            "ok": False,
+            "reason": "not_configured",
+            "message": ("Polling runs on GitHub Actions, not on this site. "
+                        "Set GH_DISPATCH_TOKEN to enable this button."),
+            "newest": newest_iso,
+        }, status_code=200)
+
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{GH_WORKFLOW}/dispatches"
+    req = urllib.request.Request(
+        url,
+        data=_json.dumps({"ref": "main"}).encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "tracker-system",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ok = resp.status in (201, 204)
+    except urllib.error.HTTPError as e:
+        log.error("Workflow dispatch failed: %s %s", e.code, e.reason)
+        return JSONResponse({"ok": False, "reason": "dispatch_failed",
+                             "message": f"GitHub refused the request ({e.code}).",
+                             "newest": newest_iso}, status_code=200)
+    except Exception as e:  # noqa: BLE001
+        log.error("Workflow dispatch error: %s", e)
+        return JSONResponse({"ok": False, "reason": "dispatch_error",
+                             "message": "Could not reach GitHub.",
+                             "newest": newest_iso}, status_code=200)
+
+    # The poller takes ~40s. The page keeps re-reading the database on its timer,
+    # so a new position appears on its own shortly after.
+    return {"ok": ok, "started": True,
+            "message": "Poller started. New positions appear within about a minute.",
+            "newest": newest_iso}
