@@ -35,19 +35,49 @@ if DB_URL.startswith("postgres://"):
 elif DB_URL.startswith("postgresql://"):
     DB_URL = "postgresql+psycopg://" + DB_URL[len("postgresql://"):]
 
+# True on Vercel/Lambda, where the bundle is on a read-only filesystem and only
+# /tmp can be written.
+SERVERLESS = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+# A SQLite URL means someone is trying the app locally; Postgres/MySQL means real use.
+_LOCAL_TRIAL = DB_URL.startswith("sqlite")
+
 # --- Secrets ----------------------------------------------------------------
 # SECRET_KEY signs the login cookie. KEY_ENCRYPTION_KEY encrypts tag keys at
 # rest. BOTH must be set to fixed values in production (see .env.example).
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-only-change-me")
+#
+# SECRET_KEY must FAIL CLOSED. A shipped default would let anyone forge an admin
+# session cookie, because the default is public in this repo's history.
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+if not SECRET_KEY:
+    if _LOCAL_TRIAL and not SERVERLESS:
+        SECRET_KEY = "dev-only-change-me"  # local SQLite trial only
+    else:
+        raise RuntimeError(
+            "SECRET_KEY is not set. Refusing to start: without it, login cookies "
+            "would be signed with a publicly known key and anyone could forge an "
+            "admin session. Set SECRET_KEY in the environment (Vercel project "
+            "settings / GitHub Actions secrets / local .env)."
+        )
+
 KEY_ENCRYPTION_KEY = os.environ.get("KEY_ENCRYPTION_KEY", "")
 
 # --- Apple fetching account -------------------------------------------------
 # The disposable Apple ID used only to pull location reports.
 APPLE_ID = os.environ.get("APPLE_ID", "")
 APPLE_PASSWORD = os.environ.get("APPLE_PASSWORD", "")
+
 # Where the cached Apple session + anisette libs live (created on first login).
-DATA_DIR = Path(os.environ.get("DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# On serverless the project directory is read-only, so default to /tmp. This must
+# never raise at import time: the web app imports this module, and an OSError here
+# takes down every request with FUNCTION_INVOCATION_FAILED.
+_default_data_dir = Path("/tmp/tracker-data") if SERVERLESS else Path(__file__).resolve().parent.parent / "data"
+DATA_DIR = Path(os.environ.get("DATA_DIR", _default_data_dir))
+try:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    # Read-only filesystem. Only the poller and local scripts actually write here;
+    # the web app never does, so let it keep running.
+    pass
 ACCOUNT_FILE = DATA_DIR / "account.json"
 ANISETTE_LIBS = DATA_DIR / "ani_libs.bin"
 
