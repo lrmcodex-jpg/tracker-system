@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in — Tracker Map</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+           display: grid; place-items: center; min-height: 100vh; margin: 0;
+           background: #0f172a; color: #e2e8f0; }
+    .card { background: #1e293b; padding: 2rem; border-radius: 14px;
+            width: min(360px, 90vw); box-shadow: 0 10px 40px rgba(0,0,0,.4); }
+    h1 { font-size: 1.25rem; margin: 0 0 1.25rem; }
+    label { display: block; font-size: .8rem; margin: .75rem 0 .25rem; color: #94a3b8; }
+    input { width: 100%; padding: .6rem .7rem; border-radius: 8px; border: 1px solid #334155;
+            background: #0f172a; color: #e2e8f0; box-sizing: border-box; font-size: 1rem; }
+    button { margin-top: 1.25rem; width: 100%; padding: .7rem; border: 0; border-radius: 8px;
+             background: #3b82f6; color: white; font-size: 1rem; cursor: pointer; }
+    button:hover { background: #2563eb; }
+    .err { background: #7f1d1d; color: #fecaca; padding: .6rem .7rem; border-radius: 8px;
+           font-size: .85rem; margin-bottom: 1rem; }
+  </style>
+</head>
+<body>
+  <form class="card" method="post" action="/login">
+    <h1>Tracker Map</h1>
+    {% if error %}<div class="err">{{ error }}</div>{% endif %}
+    <label>Email</label>
+    <input name="email" type="email" required autofocus>
+    <label>Password</label>
+    <input name="password" type="password" required>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

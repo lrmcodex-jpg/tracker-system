@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tracker Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { display: flex; align-items: center; gap: 1rem; padding: .6rem 1rem;
+             background: #0f172a; color: #e2e8f0; }
+    header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+    header .spacer { flex: 1; }
+    header a, header button { color: #93c5fd; background: none; border: 0; cursor: pointer;
+                              font-size: .85rem; text-decoration: none; }
+    #wrap { display: flex; height: calc(100vh - 44px); }
+    #sidebar { width: 280px; overflow-y: auto; border-right: 1px solid #e2e8f0;
+               background: #f8fafc; }
+    .tag { padding: .7rem 1rem; border-bottom: 1px solid #e2e8f0; cursor: pointer; }
+    .tag:hover { background: #eef2ff; }
+    .tag .name { font-weight: 600; }
+    .tag .meta { font-size: .75rem; color: #64748b; margin-top: .2rem; }
+    .tag .stale { color: #b45309; }
+    .tag .none { color: #94a3b8; font-style: italic; }
+    #map { flex: 1; }
+    @media (max-width: 640px) {
+      #wrap { flex-direction: column; height: calc(100vh - 44px); }
+      #sidebar { width: 100%; height: 40%; }
+      #map { height: 60%; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Tracker Map</h1>
+    <span class="spacer"></span>
+    <button id="refreshBtn" onclick="refreshNow()" style="background:#3b82f6;color:#fff;border:0;padding:.35rem .8rem;border-radius:6px;cursor:pointer;font-size:.85rem">Refresh now</button>
+    <span style="font-size:.8rem;color:#94a3b8">{{ user.email }}{% if user.is_team %} · team{% endif %}</span>
+    {% if user.is_team %}<a href="/admin">Admin</a>{% endif %}
+    <a href="/logout">Sign out</a>
+  </header>
+  <div id="wrap">
+    <div id="sidebar"><div style="padding:1rem;color:#64748b">Loading…</div></div>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+          integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script>
+    const map = L.map('map').setView([54.6872, 25.2797], 6); // Vilnius default
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const markers = {};
+
+    function ago(iso) {
+      if (!iso) return null;
+      const mins = Math.floor((Date.now() - new Date(iso + 'Z').getTime()) / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + ' min ago';
+      if (mins < 1440) return Math.floor(mins/60) + ' h ' + (mins%60) + ' min ago';
+      return Math.floor(mins/1440) + ' days ago';
+    }
+
+
+    async function refreshNow() {
+      const btn = document.getElementById('refreshBtn');
+      const old = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Refreshing…';
+      try {
+        const r = await fetch('/api/refresh', { method: 'POST' });
+        const d = await r.json();
+        if (r.ok) { await load(); btn.textContent = d.new_positions > 0 ? `+${d.new_positions} new` : 'Up to date'; }
+        else { btn.textContent = 'Failed'; }
+      } catch (e) { btn.textContent = 'Failed'; }
+      setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2500);
+    }
+
+    async function load() {
+      const res = await fetch('/api/trackers');
+      if (!res.ok) { location.href = '/login'; return; }
+      const tags = await res.json();
+      const sidebar = document.getElementById('sidebar');
+      sidebar.innerHTML = '';
+      const bounds = [];
+
+      for (const t of tags) {
+        const div = document.createElement('div');
+        div.className = 'tag';
+        let meta;
+        if (t.latitude == null) {
+          meta = '<div class="meta none">No location yet</div>';
+        } else {
+          const a = ago(t.reported_at);
+          const staleCls = (Date.now() - new Date(t.reported_at + 'Z').getTime() > 3600000) ? 'stale' : '';
+          meta = `<div class="meta ${staleCls}">${a} · ±${t.accuracy_m} m · ${t.battery}</div>`;
+        }
+        div.innerHTML = `<div class="name">${t.name}</div>${meta}`;
+        sidebar.appendChild(div);
+
+        if (t.latitude != null) {
+          bounds.push([t.latitude, t.longitude]);
+          if (markers[t.id]) map.removeLayer(markers[t.id]);
+          const m = L.marker([t.latitude, t.longitude]).addTo(map)
+            .bindPopup(`<b>${t.name}</b><br>${ago(t.reported_at)}<br>±${t.accuracy_m} m · ${t.battery}`);
+          markers[t.id] = m;
+          div.onclick = () => { map.setView([t.latitude, t.longitude], 16); m.openPopup(); };
+        }
+      }
+      if (bounds.length === 1) map.setView(bounds[0], 15);
+      else if (bounds.length > 1) map.fitBounds(bounds, { padding: [40, 40] });
+    }
+
+    load();
+    setInterval(load, 60000); // refresh the map every minute
+  </script>
+</body>
+</html>

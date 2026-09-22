@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin — Tracker Map</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+           background: #f8fafc; color: #0f172a; }
+    header { display: flex; align-items: center; gap: 1rem; padding: .6rem 1rem;
+             background: #0f172a; color: #e2e8f0; }
+    header h1 { font-size: 1rem; margin: 0; } header .spacer { flex: 1; }
+    header a { color: #93c5fd; text-decoration: none; font-size: .85rem; }
+    main { max-width: 900px; margin: 1.5rem auto; padding: 0 1rem; }
+    section { background: white; border: 1px solid #e2e8f0; border-radius: 12px;
+              padding: 1.25rem; margin-bottom: 1.5rem; }
+    h2 { font-size: 1rem; margin: 0 0 1rem; }
+    label { display:block; font-size:.8rem; color:#475569; margin:.6rem 0 .25rem; }
+    input, select { width: 100%; padding: .5rem; border: 1px solid #cbd5e1; border-radius: 8px;
+                    font-size: .95rem; }
+    button { margin-top: 1rem; padding: .6rem 1rem; border: 0; border-radius: 8px;
+             background: #3b82f6; color: white; cursor: pointer; font-size: .95rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+    th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #e2e8f0; }
+    .msg { padding:.6rem .8rem; border-radius:8px; margin-bottom:1rem; font-size:.9rem; }
+    .ok { background:#dcfce7; color:#166534; } .err { background:#fee2e2; color:#991b1b; }
+    .hint { font-size:.78rem; color:#64748b; margin-top:.3rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Admin</h1><span class="spacer"></span>
+    <a href="/">← Map</a> &nbsp; <a href="/logout">Sign out</a>
+  </header>
+  <main>
+    {% if msg %}<div class="msg {{ msg_kind }}">{{ msg }}</div>{% endif %}
+
+    <section>
+      <h2>Add a tracker</h2>
+      <form method="post" action="/admin/add-tracker" enctype="multipart/form-data">
+        <label>Export .zip (from OpenTagViewer)</label>
+        <input type="file" name="export" accept=".zip" required>
+        <label>Export passcode</label>
+        <input type="text" name="passcode" placeholder="the 12-character code" required>
+        <label>Assign to client</label>
+        <select name="client_id">
+          <option value="">— unassigned (team only) —</option>
+          {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+        </select>
+        <div class="hint">Every tag in the zip is imported. Name comes from the export; rename below.</div>
+        <button type="submit">Import tracker(s)</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Add a client</h2>
+      <form method="post" action="/admin/add-client">
+        <label>Client name</label>
+        <input type="text" name="name" required>
+        <button type="submit">Add client</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Add a client user</h2>
+      <form method="post" action="/admin/add-user">
+        <label>Email</label><input type="email" name="email" required>
+        <label>Password</label><input type="text" name="password" required>
+        <label>Client</label>
+        <select name="client_id" required>
+          {% for c in clients %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+        </select>
+        <div class="hint">This user will see only that client's trackers.</div>
+        <button type="submit">Create user</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Trackers</h2>
+      <table>
+        <tr><th>Name</th><th>Client</th><th>Positions</th><th>Active</th></tr>
+        {% for t in trackers %}
+        <tr>
+          <td>{{ t.name }}</td>
+          <td>{{ t.client.name if t.client else "—" }}</td>
+          <td>{{ t.pos_count }}</td>
+          <td>{{ "yes" if t.active else "no" }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </section>
+  </main>
+</body>
+</html>
