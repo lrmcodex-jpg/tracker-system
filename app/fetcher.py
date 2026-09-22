@@ -1,4 +1,12 @@
-"""Poll Apple for all active trackers, decrypt reports, store new positions."""
+"""Poll Apple for all active trackers, decrypt reports, store new positions.
+
+Runs on GitHub Actions (cron) in production, and can be run locally:
+    python -m app.fetcher
+
+Fetch strategy: for each tracker, generate every rolling key it could have
+broadcast over the query window, ask Apple for reports on those keys, and
+decrypt them. The Apple session is loaded from and saved back to the database.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +16,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .apple_account import load_account
+from .apple_account import load_account, save_account
 from .db import SessionLocal
-from .models import Position, Tracker
+from .models import AppState, Position, Tracker
 from .security import decrypt_keys
 from .tag_store import _fix_future_pairing, accessory_from_json
 
@@ -19,6 +27,7 @@ log = logging.getLogger("fetcher")
 _BATTERY = {0: "Full", 1: "Medium", 2: "Low", 3: "Very low"}
 LOOKBACK_DAYS = 7
 INDEX_BUFFER = 10
+_LAST_FETCH_KEY = "last_fetch_at"
 
 
 def _battery(status: int) -> str:
@@ -36,15 +45,43 @@ def _keys_for(acc) -> list:
     return list(dict.fromkeys(keys))
 
 
-def run_once() -> dict:
+def _recently_fetched(db, within_seconds: int) -> bool:
+    row = db.get(AppState, _LAST_FETCH_KEY)
+    if not row:
+        return False
+    try:
+        last = datetime.fromisoformat(row.value)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - last).total_seconds() < within_seconds
+
+
+def _mark_fetched(db) -> None:
+    row = db.get(AppState, _LAST_FETCH_KEY)
+    stamp = datetime.now(timezone.utc).isoformat()
+    if row is None:
+        db.add(AppState(key=_LAST_FETCH_KEY, value=stamp))
+    else:
+        row.value = stamp
+    db.commit()
+
+
+def run_once(min_interval_seconds: int = 0) -> dict:
+    """Fetch and store. If min_interval_seconds > 0 and a fetch happened more
+    recently than that, skip (used to coalesce many web viewers into one poll).
+    """
     db = SessionLocal()
     try:
+        if min_interval_seconds and _recently_fetched(db, min_interval_seconds):
+            log.info("Skipped: fetched within the last %ss.", min_interval_seconds)
+            return {"trackers": 0, "new_positions": 0, "skipped": True}
+
         trackers = db.scalars(select(Tracker).where(Tracker.active == 1)).all()
         if not trackers:
             log.info("No active trackers to poll.")
             return {"trackers": 0, "new_positions": 0}
 
-        apple = load_account()
+        apple = load_account(db)
         new_count = 0
         polled = 0
 
@@ -52,7 +89,7 @@ def run_once() -> dict:
             try:
                 acc = accessory_from_json(decrypt_keys(t.encrypted_keys))
                 _fix_future_pairing(acc)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 log.error("Tracker %s: could not load keys: %s", t.id, e)
                 continue
 
@@ -62,7 +99,7 @@ def run_once() -> dict:
 
             try:
                 result = apple.fetch_location_history(keys)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 log.error("Tracker %s: fetch failed: %s", t.id, e)
                 continue
 
@@ -91,6 +128,13 @@ def run_once() -> dict:
                     new_count += 1
                 except IntegrityError:
                     db.rollback()
+
+        # Persist the (possibly refreshed) session and the fetch timestamp.
+        try:
+            save_account(db, apple)
+        except Exception as e:  # noqa: BLE001
+            log.error("Could not save refreshed Apple session: %s", e)
+        _mark_fetched(db)
 
         log.info("Done. Stored %d new position(s).", new_count)
         return {"trackers": polled, "new_positions": new_count}

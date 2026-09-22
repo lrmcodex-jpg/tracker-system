@@ -102,3 +102,19 @@ class Position(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     tracker: Mapped["Tracker"] = relationship(back_populates="positions")
+
+
+class AppState(Base):
+    """Key/value store for things that must persist and be shared across the
+    Vercel web app, the GitHub Actions poller, and local scripts.
+
+    Keys used:
+      'apple_account' -> JSON of the fetching Apple session (from to_json)
+      'last_fetch_at' -> ISO timestamp of the last successful poll (cache guard)
+    """
+
+    __tablename__ = "app_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)

@@ -76,6 +76,31 @@ def load_accessories(zip_bytes: bytes, passcode: str | None) -> list[tuple[str, 
     return out
 
 
+def _fix_future_pairing(acc: FindMyAccessory) -> None:
+    """Guard against a pairing/alignment timestamp that lands in the future.
+
+    Some exports store the pairing date in local time but it gets read as UTC,
+    pushing it hours ahead of real time. The Find My key index is counted from
+    that date, so a future anchor makes the fetcher scan the wrong key indices
+    and return 0 reports even when Find My shows a location.
+
+    If the anchor is at or ahead of now, re-anchor it safely into the past
+    (index 0, 8 days ago). The fetcher then scans a wide positive index range
+    that covers any tag paired within the last week, and self-corrects its
+    alignment from the first real report it decrypts. This never loses reports.
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        anchor = acc._alignment_date  # noqa: SLF001
+        if anchor.tzinfo is None:
+            anchor = anchor.astimezone()
+    except Exception:
+        return
+    if anchor >= now - timedelta(hours=1):
+        acc._alignment_date = now - timedelta(days=8)  # noqa: SLF001
+        acc._alignment_index = 0  # noqa: SLF001
+
+
 def _to_json_str(acc: FindMyAccessory) -> str:
     """FindMyAccessory.to_json returns a dict; serialise it to a JSON string."""
     import json
@@ -88,24 +113,3 @@ def accessory_from_json(keys_json: str) -> FindMyAccessory:
     import json
 
     return FindMyAccessory.from_json(json.loads(keys_json))
-
-
-def _fix_future_pairing(acc) -> None:
-    """Re-anchor a tag whose pairing/alignment date is in the future.
-
-    Exports can store the pairing time in local tz but it is read as UTC,
-    pushing the key-index anchor hours ahead of now. The fetcher then scans
-    the wrong key indices and gets 0 reports even when Find My shows a
-    location. If the anchor is at/after now, move it safely into the past so
-    the fetcher scans a wide positive index range covering the last week.
-    """
-    now = datetime.now(timezone.utc)
-    try:
-        anchor = acc._alignment_date
-        if anchor.tzinfo is None:
-            anchor = anchor.astimezone()
-    except Exception:
-        return
-    if anchor >= now - timedelta(hours=1):
-        acc._alignment_date = now - timedelta(days=8)
-        acc._alignment_index = 0

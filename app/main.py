@@ -152,13 +152,19 @@ def _visible_trackers(db: Session, user: User) -> list[Tracker]:
 
 @app.post("/api/refresh")
 def api_refresh(request: Request, db: Session = Depends(get_db)):
-    """Force an immediate poll of Apple for the newest reports."""
+    """Force an immediate poll of Apple for the newest reports.
+
+    This does NOT contact the tags (impossible over the internet). It fetches
+    the latest reports other iPhones have already uploaded to Apple, without
+    waiting for the 15-minute scheduler. Any logged-in user may trigger it;
+    it refreshes every tracker, but each user still only SEES their own.
+    """
     user = current_user(request, db)
     if user is None:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     try:
         result = fetcher.run_once()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.error("Manual refresh failed: %s", e)
         return JSONResponse({"error": str(e)}, status_code=500)
     return {"ok": True, "new_positions": result.get("new_positions", 0)}
@@ -226,7 +232,7 @@ def _admin_ctx(request: Request, db: Session, user: User, msg=None, kind="ok"):
         )
     return {
         "request": request, "user": user, "clients": clients, "trackers": trackers,
-        "msg": msg, "msg_kind": kind,
+        "msg": msg, "msg_kind": kind, "can_add_tracker": True,
     }
 
 

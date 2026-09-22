@@ -74,9 +74,15 @@
       try {
         const r = await fetch('/api/refresh', { method: 'POST' });
         const d = await r.json();
-        if (r.ok) { await load(); btn.textContent = d.new_positions > 0 ? `+${d.new_positions} new` : 'Up to date'; }
-        else { btn.textContent = 'Failed'; }
-      } catch (e) { btn.textContent = 'Failed'; }
+        if (r.ok) {
+          await load();
+          btn.textContent = d.new_positions > 0 ? `+${d.new_positions} new` : 'Up to date';
+        } else {
+          btn.textContent = 'Failed';
+        }
+      } catch (e) {
+        btn.textContent = 'Failed';
+      }
       setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 2500);
     }
 

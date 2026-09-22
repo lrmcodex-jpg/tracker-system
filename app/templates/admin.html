@@ -37,7 +37,7 @@
   <main>
     {% if msg %}<div class="msg {{ msg_kind }}">{{ msg }}</div>{% endif %}
 
-    <section>
+    {% if can_add_tracker %}<section>
       <h2>Add a tracker</h2>
       <form method="post" action="/admin/add-tracker" enctype="multipart/form-data">
         <label>Export .zip (from OpenTagViewer)</label>
@@ -52,7 +52,11 @@
         <div class="hint">Every tag in the zip is imported. Name comes from the export; rename below.</div>
         <button type="submit">Import tracker(s)</button>
       </form>
-    </section>
+    </section>{% else %}<section>
+      <h2>Add a tracker</h2>
+      <p class="hint">Trackers are imported from the command line (they need the Find My libraries, which don't run on the website host). On the machine with your export zip, run:<br>
+      <code>python -m app.add_tracker &lt;export.zip&gt; [client_id]</code></p>
+    </section>{% endif %}
 
     <section>
       <h2>Add a client</h2>

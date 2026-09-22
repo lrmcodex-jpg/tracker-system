@@ -1,30 +1,53 @@
-"""Manage the single Apple account used to fetch location reports.
+"""Manage the fetching Apple session, stored in the database.
 
-The account session is cached to disk (ACCOUNT_FILE) after the first login so
-the fetcher can run unattended. The FIRST login needs a 2FA code and must be
-done interactively once, using the setup script (setup_apple_login.py).
+Storing the session in the DB (not a local file) is what lets the same login
+work across your Mac, the GitHub Actions poller, and anywhere else — they all
+share one database. The anisette native libs are cached to a temp dir and
+downloaded on first use (fine on any full Linux/macOS environment; NOT on
+Vercel, which is why the poller runs on GitHub Actions instead).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import tempfile
+from pathlib import Path
 
 from findmy import AppleAccount, LocalAnisetteProvider
 
-from .config import ACCOUNT_FILE, ANISETTE_LIBS
-
 log = logging.getLogger("apple")
 
+_ACCOUNT_KEY = "apple_account"
+_LIBS_PATH = Path(tempfile.gettempdir()) / "ani_libs.bin"
 
-def load_account() -> AppleAccount:
-    """Load the cached Apple session. Raises if the first-time login hasn't run."""
-    if not ACCOUNT_FILE.exists():
+
+def load_account(db) -> AppleAccount:
+    """Load the cached Apple session from the DB."""
+    from .models import AppState
+
+    row = db.get(AppState, _ACCOUNT_KEY)
+    if row is None:
         raise RuntimeError(
-            "No Apple session found. Run the one-time login first:\n"
+            "No Apple session in the database. Run the one-time login first:\n"
             "    python -m app.setup_apple_login"
         )
-    return AppleAccount.from_json(str(ACCOUNT_FILE), anisette_libs_path=str(ANISETTE_LIBS))
+    mapping = json.loads(row.value)
+    return AppleAccount.from_json(mapping, anisette_libs_path=str(_LIBS_PATH))
 
 
-def save_account(acc: AppleAccount) -> None:
-    acc.to_json(str(ACCOUNT_FILE))
+def save_account(db, acc: AppleAccount) -> None:
+    """Persist the (possibly refreshed) Apple session back to the DB."""
+    from .models import AppState
+
+    payload = json.dumps(acc.to_json())
+    row = db.get(AppState, _ACCOUNT_KEY)
+    if row is None:
+        db.add(AppState(key=_ACCOUNT_KEY, value=payload))
+    else:
+        row.value = payload
+    db.commit()
+
+
+def anisette_provider() -> LocalAnisetteProvider:
+    return LocalAnisetteProvider(libs_path=str(_LIBS_PATH))
