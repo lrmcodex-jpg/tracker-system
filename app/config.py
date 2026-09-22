@@ -29,6 +29,12 @@ DB_URL = os.environ.get(
     "sqlite:///" + str(Path(__file__).resolve().parent.parent / "tracker.db"),
 )
 
+# Normalize Supabase/Heroku-style URLs to the psycopg (v3) driver.
+if DB_URL.startswith("postgres://"):
+    DB_URL = "postgresql+psycopg://" + DB_URL[len("postgres://"):]
+elif DB_URL.startswith("postgresql://"):
+    DB_URL = "postgresql+psycopg://" + DB_URL[len("postgresql://"):]
+
 # --- Secrets ----------------------------------------------------------------
 # SECRET_KEY signs the login cookie. KEY_ENCRYPTION_KEY encrypts tag keys at
 # rest. BOTH must be set to fixed values in production (see .env.example).
