@@ -1,31 +1,50 @@
 name: Poll Find My
 
-# Runs the fetcher on a schedule. GitHub Actions cron minimum is 5 minutes and
-# is best-effort (can drift under load). Find My data is delayed anyway, so this
-# is fine. You can also trigger it manually from the Actions tab.
+# WHY THIS IS SHAPED LIKE THIS
+#
+# GitHub's "*/5" cron never fired once for this repo: in the first ~2 hours the
+# only runs were manual. Short-interval schedules are best-effort and are the
+# first thing GitHub drops under load, so one poll per cron tick means relying on
+# the least reliable part of the system.
+#
+# Instead each run POLLS IN A LOOP for ~55 minutes and then exits, so the cron
+# only has to fire roughly once an hour to keep coverage continuous. A skipped
+# tick self-heals on the next one. The repo is public, so Actions minutes are
+# unlimited and the long-running job costs nothing.
+
 on:
   schedule:
-    - cron: "*/5 * * * *"
-  workflow_dispatch: {}
+    # Hourly, plus a half-past tick so a missed hour recovers within 30 minutes.
+    - cron: "3 * * * *"
+    - cron: "33 * * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long this run should keep polling, in minutes"
+        required: false
+        default: "55"
 
+# One poller at a time. A newer queued run replaces an older queued one, so the
+# queue can never grow, but a run already in flight is left alone.
 concurrency:
   group: poll
   cancel-in-progress: false
 
 permissions:
   contents: read
-  issues: write        # lets the failure step open an alert issue
 
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 70
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Cache anisette libs
         uses: actions/cache@v4
@@ -36,47 +55,46 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-poller.txt
 
-      - name: Run poller
+      - name: Poll in a loop
         env:
           DB_URL: ${{ secrets.DB_URL }}
           KEY_ENCRYPTION_KEY: ${{ secrets.KEY_ENCRYPTION_KEY }}
           SECRET_KEY: ${{ secrets.SECRET_KEY }}
-        run: python -m app.fetcher
+          # Never interpolated into the script directly; read as an env var and
+          # stripped to digits below, so a crafted input cannot inject shell.
+          RUN_MINUTES_RAW: ${{ github.event.inputs.minutes }}
+        run: |
+          set -u
+          MINUTES=$(printf '%s' "${RUN_MINUTES_RAW:-}" | tr -cd '0-9')
+          [ -z "$MINUTES" ] && MINUTES=55
+          [ "$MINUTES" -gt 60 ] && MINUTES=60
+          [ "$MINUTES" -lt 1 ] && MINUTES=1
 
-      # If the poller failed, open (or update) a GitHub issue so the team is
-      # notified by GitHub's normal email/notification system. Most commonly a
-      # failure means the Apple session expired and needs a re-login:
-      #   python -m app.setup_apple_login
-      - name: Alert on failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const title = "⚠️ Find My poller failed — action needed";
-            const body = [
-              "The scheduled Find My poll failed. The map will go stale until this is fixed.",
-              "",
-              "**Most likely cause:** the Apple fetching session expired. Re-login on a machine with the repo:",
-              "```",
-              "python -m app.setup_apple_login",
-              "```",
-              "",
-              `Failed run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-            ].join("\n");
-            // Reuse an existing open alert issue if there is one, else create it.
-            const existing = await github.rest.issues.listForRepo({
-              owner: context.repo.owner, repo: context.repo.repo,
-              state: "open", labels: "poller-alert",
-            });
-            if (existing.data.length === 0) {
-              await github.rest.issues.create({
-                owner: context.repo.owner, repo: context.repo.repo,
-                title, body, labels: ["poller-alert"],
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: existing.data[0].number,
-                body: "Poller failed again.\n\n" + body,
-              });
-            }
+          INTERVAL=300                       # 5 minutes between polls
+          DEADLINE=$(( $(date +%s) + MINUTES * 60 ))
+          N=0
+          FAILS=0
+          echo "Polling every ${INTERVAL}s for ${MINUTES} minute(s)."
+
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            N=$((N + 1))
+            echo "::group::poll #$N at $(date -u '+%H:%M:%S') UTC"
+            if python -m app.fetcher; then
+              FAILS=0
+            else
+              FAILS=$((FAILS + 1))
+              echo "poll #$N failed (consecutive failures: $FAILS)"
+              # Three in a row means something real is wrong: an expired Apple
+              # session, or the database unreachable. Fail the run so it shows up
+              # red instead of quietly looping on a broken state.
+              if [ "$FAILS" -ge 3 ]; then
+                echo "::error::Three consecutive poll failures, stopping."
+                exit 1
+              fi
+            fi
+            echo "::endgroup::"
+            REMAIN=$(( DEADLINE - $(date +%s) ))
+            [ "$REMAIN" -lt "$INTERVAL" ] && break
+            sleep "$INTERVAL"
+          done
+          echo "Completed $N poll(s) in this run."
