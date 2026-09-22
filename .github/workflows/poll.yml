@@ -1,0 +1,33 @@
+name: Poll Find My
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cache anisette libs
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ani_libs.bin
+          key: ani-libs-v1
+      - name: Install dependencies
+        run: pip install -r requirements-poller.txt
+      - name: Run poller
+        env:
+          DB_URL: ${{ secrets.DB_URL }}
+          KEY_ENCRYPTION_KEY: ${{ secrets.KEY_ENCRYPTION_KEY }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+        run: python -m app.fetcher
