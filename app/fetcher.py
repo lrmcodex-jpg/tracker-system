@@ -27,6 +27,9 @@ log = logging.getLogger("fetcher")
 _BATTERY = {0: "Full", 1: "Medium", 2: "Low", 3: "Very low"}
 LOOKBACK_DAYS = 7
 INDEX_BUFFER = 10
+# Apple refuses a request carrying much more than ~290 key ids. Stay under it
+# with room to spare; the key list grows by about 96 entries per day of tag age.
+KEY_CHUNK = 200
 _LAST_FETCH_KEY = "last_fetch_at"
 
 
@@ -97,18 +100,36 @@ def run_once(min_interval_seconds: int = 0) -> dict:
             log.info("Tracker %s (%s): querying %d keys...", t.id, t.name, len(keys))
             polled += 1
 
-            try:
-                result = apple.fetch_location_history(keys)
-            except Exception as e:  # noqa: BLE001
-                log.error("Tracker %s: fetch failed: %s", t.id, e)
-                continue
-
+            # Apple rejects a request carrying more than roughly 290 ids, and the
+            # key list grows by ~96 every day the tag lives. Measured on this
+            # tag: 66 keys on day 0, 260 on day 2, 357 on day 3. Sending them in
+            # one request would start failing on day 3 and never recover.
+            #
+            # Chunking also contains damage: one report that fails to decrypt
+            # takes down only its own chunk instead of the whole poll.
             reports = []
-            if isinstance(result, dict):
-                for rs in result.values():
-                    reports.extend(rs or [])
-            elif result:
-                reports = list(result)
+            chunk_failures = 0
+            for start in range(0, len(keys), KEY_CHUNK):
+                chunk = keys[start:start + KEY_CHUNK]
+                try:
+                    result = apple.fetch_location_history(chunk)
+                except Exception as e:  # noqa: BLE001
+                    chunk_failures += 1
+                    # repr(), not str(): several of these exceptions carry an
+                    # empty message, which previously logged a blank line and
+                    # hid the real failure completely.
+                    log.error("Tracker %s: chunk %d-%d failed: %r",
+                              t.id, start, start + len(chunk), e)
+                    continue
+                if isinstance(result, dict):
+                    for rs in result.values():
+                        reports.extend(rs or [])
+                elif result:
+                    reports.extend(result)
+
+            if chunk_failures:
+                log.warning("Tracker %s: %d of %d chunk(s) failed.", t.id,
+                            chunk_failures, (len(keys) + KEY_CHUNK - 1) // KEY_CHUNK)
 
             log.info("Tracker %s: %d report(s) from Apple.", t.id, len(reports))
 
