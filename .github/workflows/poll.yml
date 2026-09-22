@@ -1,31 +1,32 @@
 name: Poll Find My
 
-# WHY THIS IS SHAPED LIKE THIS
+# WHY THIS DOES NOT USE A SCHEDULE
 #
-# GitHub's "*/5" cron never fired once for this repo: in the first ~2 hours the
-# only runs were manual. Short-interval schedules are best-effort and are the
-# first thing GitHub drops under load, so one poll per cron tick means relying on
-# the least reliable part of the system.
+# GitHub's scheduler never fired for this repository. Over five hours it was
+# tried at "*/5 * * * *", then hourly at ":03" and ":33", on a public repo with
+# unlimited Actions minutes, with the workflow active and Actions enabled. Zero
+# scheduled runs. Meanwhile every workflow_dispatch ran perfectly.
 #
-# Instead each run POLLS IN A LOOP for ~55 minutes and then exits, so the cron
-# only has to fire roughly once an hour to keep coverage continuous. A skipped
-# tick self-heals on the next one. The repo is public, so Actions minutes are
-# unlimited and the long-running job costs nothing.
+# So the schedule is kept only as a free backup in case GitHub ever starts
+# honouring it, and the real mechanism is a chain: each run polls for ~5.5 hours
+# and then starts its successor with an explicit dispatch. GitHub's built-in
+# GITHUB_TOKEN deliberately cannot trigger another workflow (loop protection),
+# so the chain step uses DISPATCH_PAT.
 
 on:
   schedule:
-    # Hourly, plus a half-past tick so a missed hour recovers within 30 minutes.
-    - cron: "3 * * * *"
-    - cron: "33 * * * *"
+    - cron: "7 */4 * * *"   # backup only; has never actually fired
   workflow_dispatch:
     inputs:
       minutes:
         description: "How long this run should keep polling, in minutes"
         required: false
-        default: "55"
+        default: "330"
+      chain:
+        description: "Start a successor run when this one ends (true/false)"
+        required: false
+        default: "true"
 
-# One poller at a time. A newer queued run replaces an older queued one, so the
-# queue can never grow, but a run already in flight is left alone.
 concurrency:
   group: poll
   cancel-in-progress: false
@@ -36,7 +37,7 @@ permissions:
 jobs:
   poll:
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 350        # GitHub hard-caps a job at 360
 
     steps:
       - uses: actions/checkout@v4
@@ -56,24 +57,24 @@ jobs:
         run: pip install -r requirements-poller.txt
 
       - name: Poll in a loop
+        id: poll
         env:
           DB_URL: ${{ secrets.DB_URL }}
           KEY_ENCRYPTION_KEY: ${{ secrets.KEY_ENCRYPTION_KEY }}
           SECRET_KEY: ${{ secrets.SECRET_KEY }}
-          # Never interpolated into the script directly; read as an env var and
-          # stripped to digits below, so a crafted input cannot inject shell.
+          # Read via env and sanitised below; never interpolated into the shell.
           RUN_MINUTES_RAW: ${{ github.event.inputs.minutes }}
         run: |
           set -u
           MINUTES=$(printf '%s' "${RUN_MINUTES_RAW:-}" | tr -cd '0-9')
-          [ -z "$MINUTES" ] && MINUTES=55
-          [ "$MINUTES" -gt 60 ] && MINUTES=60
+          [ -z "$MINUTES" ] && MINUTES=330
+          [ "$MINUTES" -gt 330 ] && MINUTES=330
           [ "$MINUTES" -lt 1 ] && MINUTES=1
 
-          INTERVAL=300                       # 5 minutes between polls
-          DEADLINE=$(( $(date +%s) + MINUTES * 60 ))
-          N=0
-          FAILS=0
+          INTERVAL=300
+          STARTED=$(date +%s)
+          DEADLINE=$(( STARTED + MINUTES * 60 ))
+          N=0; FAILS=0
           echo "Polling every ${INTERVAL}s for ${MINUTES} minute(s)."
 
           while [ "$(date +%s)" -lt "$DEADLINE" ]; do
@@ -83,12 +84,10 @@ jobs:
               FAILS=0
             else
               FAILS=$((FAILS + 1))
-              echo "poll #$N failed (consecutive failures: $FAILS)"
-              # Three in a row means something real is wrong: an expired Apple
-              # session, or the database unreachable. Fail the run so it shows up
-              # red instead of quietly looping on a broken state.
+              echo "poll #$N failed (consecutive: $FAILS)"
               if [ "$FAILS" -ge 3 ]; then
                 echo "::error::Three consecutive poll failures, stopping."
+                echo "ran_seconds=$(( $(date +%s) - STARTED ))" >> "$GITHUB_OUTPUT"
                 exit 1
               fi
             fi
@@ -97,4 +96,31 @@ jobs:
             [ "$REMAIN" -lt "$INTERVAL" ] && break
             sleep "$INTERVAL"
           done
-          echo "Completed $N poll(s) in this run."
+          echo "ran_seconds=$(( $(date +%s) - STARTED ))" >> "$GITHUB_OUTPUT"
+          echo "Completed $N poll(s)."
+
+      - name: Start the successor run
+        # Always chain, including after a failure, so one bad Apple response
+        # cannot end the collector permanently. The guard below stops a crash
+        # loop: a run that died in under two minutes does not get a successor.
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.DISPATCH_PAT }}
+          RAN_SECONDS: ${{ steps.poll.outputs.ran_seconds }}
+          CHAIN_RAW: ${{ github.event.inputs.chain }}
+        run: |
+          set -u
+          CHAIN=$(printf '%s' "${CHAIN_RAW:-true}" | tr -cd 'a-z')
+          [ "$CHAIN" = "false" ] && { echo "Chaining disabled for this run."; exit 0; }
+          RAN=$(printf '%s' "${RAN_SECONDS:-0}" | tr -cd '0-9')
+          [ -z "$RAN" ] && RAN=0
+          if [ "$RAN" -lt 120 ]; then
+            echo "::warning::Run lasted ${RAN}s (<120s). Not chaining, to avoid a crash loop."
+            exit 0
+          fi
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::DISPATCH_PAT is not set, so no successor was started."
+            exit 0
+          fi
+          echo "Starting the successor run."
+          gh workflow run poll.yml --repo "$GITHUB_REPOSITORY" -f minutes=330 -f chain=true
