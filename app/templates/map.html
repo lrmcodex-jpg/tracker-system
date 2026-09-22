@@ -99,8 +99,18 @@
           }, 9000);
           return;
         }
-        // Not configured, or GitHub refused. Say which, do not just say "Failed".
-        btn.textContent = d.reason === 'not_configured' ? 'Polling is scheduled' : 'Refresh unavailable';
+        // This template is served by BOTH apps, and they answer differently:
+        //   app/main.py  (local)  polls Apple itself -> {ok, new_positions}
+        //   app/web.py   (Vercel) cannot poll Apple  -> {ok, reason} or {ok, started}
+        // Checking only for Vercel's fields made a successful local refresh
+        // report "Refresh unavailable", which was wrong.
+        if (typeof d.new_positions === 'number') {
+          btn.textContent = d.new_positions > 0 ? `+${d.new_positions} new` : 'Up to date';
+        } else if (d.reason === 'not_configured') {
+          btn.textContent = 'Polling is scheduled';
+        } else {
+          btn.textContent = 'Refresh unavailable';
+        }
         if (d.message) btn.title = d.message;
       } catch (e) {
         btn.textContent = 'Failed';
