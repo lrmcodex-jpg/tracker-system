@@ -82,6 +82,16 @@
     </section>
 
     <section>
+      <h2>Add a team user</h2>
+      <form method="post" action="/admin/add-team-user">
+        <label>Email</label><input type="email" name="email" required>
+        <label>Password</label><input type="text" name="password" required>
+        <div class="hint">Team users have full access: all trackers, all clients, and this admin page.</div>
+        <button type="submit">Create team user</button>
+      </form>
+    </section>
+
+    <section>
       <h2>Trackers</h2>
       <table>
         <tr><th>Name</th><th>Client</th><th>Positions</th><th>Active</th></tr>

@@ -196,3 +196,16 @@ def add_user(request: Request, email: str = Form(...), password: str = Form(...)
     db.commit()
     return templates.TemplateResponse(request, "admin.html",
         _admin_ctx(request, db, user, f"Client user '{email}' created."))
+
+
+@app.post("/admin/add-team-user")
+def add_team_user(request: Request, email: str = Form(...), password: str = Form(...),
+                  user: User = Depends(require_team), db: Session = Depends(get_db)):
+    email = email.strip().lower()
+    if db.scalar(select(User).where(User.email == email)):
+        return templates.TemplateResponse(request, "admin.html",
+            _admin_ctx(request, db, user, "That email already exists.", "err"))
+    db.add(User(email=email, password_hash=hash_password(password), role="team", client_id=None))
+    db.commit()
+    return templates.TemplateResponse(request, "admin.html",
+        _admin_ctx(request, db, user, f"Team user '{email}' created (full access)."))
