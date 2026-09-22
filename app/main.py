@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -45,11 +46,22 @@ def startup() -> None:
     Base.metadata.create_all(engine)
     _seed_admin()
     scheduler = BackgroundScheduler(daemon=True)
-    scheduler.add_job(
-        _safe_fetch, "interval", minutes=POLL_INTERVAL_MIN, next_run_time=None
-    )
+    # next_run_time=None used to be passed here. In APScheduler that does not
+    # mean "start on the normal interval", it means PAUSED, so the background
+    # poller never ran even though the log below claimed it had started. That is
+    # why the local map could sit unchanged for hours.
+    scheduler.add_job(_safe_fetch, "interval", minutes=POLL_INTERVAL_MIN)
     scheduler.start()
-    log.info("Scheduler started: polling every %d min.", POLL_INTERVAL_MIN)
+
+    # Log the real next run time, so a paused job can never masquerade as a
+    # running one again.
+    jobs = scheduler.get_jobs()
+    nxt = jobs[0].next_run_time if jobs else None
+    if nxt is None:
+        log.error("Scheduler started but the poll job is PAUSED - it will never run.")
+    else:
+        log.info("Scheduler started: polling every %d min, first run at %s.",
+                 POLL_INTERVAL_MIN, nxt.isoformat(timespec="seconds"))
 
 
 def _safe_fetch() -> None:
@@ -60,18 +72,30 @@ def _safe_fetch() -> None:
 
 
 def _seed_admin() -> None:
-    """Create a default team admin on first run if there are no users."""
+    """Create the first team user from the environment, never from a default.
+
+    This used to seed admin@local / admin. The same code was removed from
+    app/web.py because on a public URL it is a full compromise, and it is
+    removed here too: this app binds to 0.0.0.0, so "it is only local" is not
+    true on a shared network. No credentials in the environment means no
+    account is created, which locks everyone out rather than letting anyone in.
+    """
+    email = os.environ.get("ADMIN_EMAIL", "").strip().lower()
+    password = os.environ.get("ADMIN_PASSWORD", "")
+
     db = SessionLocal()
     try:
-        if db.scalar(select(func.count()).select_from(User)) == 0:
-            admin = User(
-                email="admin@local",
-                password_hash=hash_password("admin"),
-                role="team",
+        if db.scalar(select(func.count()).select_from(User)) != 0:
+            return
+        if not email or not password:
+            log.warning(
+                "No users exist and ADMIN_EMAIL/ADMIN_PASSWORD are not set, so no "
+                "account was created. Set both in .env and restart."
             )
-            db.add(admin)
-            db.commit()
-            log.warning("Seeded default admin: admin@local / admin  — CHANGE THIS.")
+            return
+        db.add(User(email=email, password_hash=hash_password(password), role="team"))
+        db.commit()
+        log.info("Seeded first team user %s from the environment.", email)
     finally:
         db.close()
 
