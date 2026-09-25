@@ -12,7 +12,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Form, Request
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -207,7 +207,7 @@ def _admin_ctx(request, db, user, msg=None, kind="ok"):
     for t in trackers:
         t.pos_count = db.scalar(select(func.count()).select_from(Position).where(Position.tracker_id == t.id))
     return {"request": request, "user": user, "clients": clients, "trackers": trackers,
-            "msg": msg, "msg_kind": kind, "can_add_tracker": False}
+            "msg": msg, "msg_kind": kind, "can_add_tracker": True}
 
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -375,3 +375,104 @@ def api_refresh(request: Request, db: Session = Depends(get_db)):
     return {"ok": ok, "started": True,
             "message": "Poller started. New positions appear within about a minute.",
             "newest": newest_iso}
+
+
+# --- admin: import a tracker from an export zip ------------------------------
+# This used to be command-line only, on the reasoning that the Find My stack
+# cannot run on Vercel. That is only half true. The heavy part is `unicorn`, a
+# 40 MB CPU emulator used to generate Apple *authentication* headers, and that
+# is needed to FETCH locations, not to read an export. Verified by blocking
+# unicorn entirely and running the whole path: open the encrypted zip, parse the
+# plists, build the accessory, derive rolling keys, re-serialise and encrypt.
+# All of it works without the emulator, so the upload can live here.
+#
+# findmy is imported lazily inside the handler. At module scope every request,
+# including the map and the login page, would pay its import cost on each cold
+# start.
+MAX_EXPORT_BYTES = 8 * 1024 * 1024   # exports are tens of KB; this is generous
+
+
+@app.post("/admin/add-tracker")
+async def add_tracker(request: Request,
+                      export: UploadFile = File(...),
+                      passcode: str = Form(...),
+                      client_id: str = Form(""),
+                      user: User = Depends(require_team),
+                      db: Session = Depends(get_db)):
+    def fail(message: str):
+        return templates.TemplateResponse(
+            request, "admin.html", _admin_ctx(request, db, user, message, "err"))
+
+    data = await export.read()
+    if not data:
+        return fail("That file was empty. Pick the .zip OpenTagViewer produced.")
+    if len(data) > MAX_EXPORT_BYTES:
+        return fail(f"That file is {len(data) // 1024} KB. An export is normally "
+                    "well under a megabyte, so this looks like the wrong file.")
+    if not data.startswith(b"PK"):
+        return fail("That is not a .zip file. Upload the export itself, not a "
+                    "screenshot or an unzipped folder.")
+
+    # Validate the client BEFORE touching the keys, so a bad id cannot leave
+    # trackers imported as unassigned and silently invisible to the client.
+    cid = None
+    if client_id:
+        try:
+            cid = int(client_id)
+        except ValueError:
+            return fail("That client selection was not valid.")
+        if db.get(Client, cid) is None:
+            return fail("That client no longer exists. Reload the page and retry.")
+
+    try:
+        from .security import encrypt_keys
+        from .tag_store import load_accessories
+    except ImportError as e:
+        log.error("Import libraries unavailable: %r", e)
+        return fail("The import libraries are not available on this deployment. "
+                    "Run it from the command line instead.")
+
+    # Check the encryption key BEFORE reading the export. Without it the keys
+    # cannot be stored, and finding that out after parsing would either throw a
+    # raw 500 or, worse, leave the tag half-imported.
+    try:
+        encrypt_keys("probe")
+    except Exception as e:  # noqa: BLE001
+        log.error("KEY_ENCRYPTION_KEY unusable: %r", e)
+        return fail("Tracker keys cannot be encrypted because KEY_ENCRYPTION_KEY "
+                    "is missing or invalid on this deployment. Nothing was imported.")
+
+    try:
+        accessories = load_accessories(data, passcode)
+    except Exception as e:  # noqa: BLE001
+        # load_accessories raises ValueError with a readable message for the two
+        # things that actually go wrong: wrong passcode, and a zip with no tags.
+        log.warning("Tracker import rejected: %r", e)
+        return fail(f"Import failed: {e}")
+
+    if not accessories:
+        return fail("No tags were found in that export.")
+
+    added, skipped = 0, 0
+    for identifier, name, keys_json in accessories:
+        if db.scalar(select(Tracker).where(Tracker.identifier == identifier)):
+            skipped += 1
+            continue
+        db.add(Tracker(name=name, identifier=identifier, client_id=cid,
+                       active=1, encrypted_keys=encrypt_keys(keys_json)))
+        added += 1
+    db.commit()
+    log.info("%s imported %d tracker(s), skipped %d.", user.email, added, skipped)
+
+    if added == 0 and skipped:
+        return templates.TemplateResponse(request, "admin.html", _admin_ctx(
+            request, db, user,
+            f"Nothing new: {skipped} tag(s) in that export are already here.", "ok"))
+
+    # Unlike the local app, this cannot poll Apple itself: that genuinely does
+    # need the emulator. The collector picks the new tag up on its next pass.
+    msg = (f"Imported {added} tracker(s)."
+           + (f" Skipped {skipped} already present." if skipped else "")
+           + " A location appears after the next collection, within about five minutes.")
+    return templates.TemplateResponse(request, "admin.html",
+                                      _admin_ctx(request, db, user, msg))

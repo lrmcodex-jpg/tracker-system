@@ -1,3 +1,6 @@
+# What Vercel installs. Kept deliberately small: the site must deploy inside
+# the serverless size limit, so the poller's extras live in
+# requirements-poller.txt instead.
 fastapi>=0.115
 sqlalchemy>=2.0
 psycopg[binary]>=3.1
@@ -5,3 +8,17 @@ jinja2>=3.1
 python-multipart>=0.0.9
 itsdangerous>=2.2
 bcrypt>=4.1
+
+# Needed only by the admin "Add a tracker" upload, which reads an OpenTagViewer
+# export: pyzipper opens the AES-encrypted zip, findmy parses the plists and
+# derives the rolling keys, cryptography encrypts them at rest.
+#
+# findmy also pulls in `unicorn`, a 40 MB CPU emulator. That is used to generate
+# Apple authentication headers when FETCHING locations, which this app never
+# does. Verified by blocking unicorn and running the entire import path: it is
+# unused here. It is left installed because the measured bundle is ~188 MB
+# against Vercel's 250 MB limit, and removing a dependency pip chose is more
+# fragile than carrying it.
+findmy>=0.10.2
+pyzipper>=0.4
+cryptography>=42.0
